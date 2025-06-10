@@ -5,8 +5,8 @@ import soundfile as sf
 from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor
 
 # โหลดโมเดลจาก Hugging Face
-MODEL_NAME = "https://huggingface.co/B4by/Test"
-model = AutoModelForSpeechSeq2Seq.from_pretrained(MODEL_NAME)
+MODEL_NAME = "B4by/Test"
+model = AutoModelForSpeechSeq2Seq.from_pretrained("B4by/Test", use_auth_token=True)
 processor = AutoProcessor.from_pretrained(MODEL_NAME)
 
 # ฟังก์ชันแปลงเสียง
