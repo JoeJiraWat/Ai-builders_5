@@ -1,5 +1,5 @@
-torch
-transformers
-librosa
-soundfile
-streamlit
+torch==2.7.0
+transformers == 4.52.4 
+librosa == 0.10.0
+soundfile == 0.12.1
+streamlit == 1.28.0
