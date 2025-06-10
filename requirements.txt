@@ -7,3 +7,4 @@ huggingface_hub == 0.32.4
 gradio == 5.33.1
 faiss == 1.5.3
 faiss-gpu == 1.11.0
+rich==13.4.2
