@@ -4,9 +4,15 @@ import soundfile as sf
 import torch
 
 # โหลดโมเดล RVC
+
 MODEL_PATH = "model/model.pth"
-model = torch.load(MODEL_PATH, map_location="cpu")
-model.eval()
+from my_model_library import RVCModel  # ตรวจสอบว่าโมเดลถูกต้อง
+model = RVCModel()  # สร้างโมเดลใหม่ตามโครงสร้างเดิม
+state_dict = torch.load(MODEL_PATH, map_location="cpu")
+
+model.load_state_dict(state_dict)  # โหลดข้อมูลโมเดล
+model.eval()  # ตั้งค่าโหมดทดสอบ
+
 
 # ฟังก์ชันแปลงเสียง
 def convert_audio(input_audio_path):
