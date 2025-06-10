@@ -4,7 +4,7 @@ import soundfile as sf
 import torch
 
 # โหลดโมเดล RVC
-MODEL_PATH = "model.pth"
+MODEL_PATH = "model/model.pth"
 model = torch.load(MODEL_PATH, map_location="cpu")
 model.eval()
 
