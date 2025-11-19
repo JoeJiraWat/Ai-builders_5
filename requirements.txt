@@ -1,25 +1,4 @@
-streamlit==1.28.0
-torch==2.2.0
-soundfile==0.12.1
-librosa==0.10.1
-numpy==1.24.3
-onnxruntime==1.17.0
-scipy==1.11.3
-huggingface_hub==0.21.1
-transformers==4.38.2
-fairseq==0.12.2
-gradio==3.57.0
-tqdm==4.66.1
-faiss-cpu==1.7.4
+streamlit>=1.28.0
 torch>=2.0.0
 torchaudio>=2.0.0
-torchvision>=0.15.0
-numpy>=1.24.0
-scipy>=1.10.0
-librosa>=0.10.0
-soundfile>=0.12.0
-matplotlib>=3.7.0
-tqdm>=4.65.0
-colorama>=0.4.6
-streamlit>=1.25.0
-watchdog>=3.0.0  # ช่วยให้ Streamlit รีโหลดไฟล์เร็วขึ้นเวลาแก้โค้ด
+numpy>=1.24.0,<2.0.0
