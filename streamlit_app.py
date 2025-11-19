@@ -6,10 +6,14 @@ import torchaudio.transforms as T
 import io
 import os
 import numpy as np
-import soundfile as sf
 
-# ตัวแปรสำหรับเก็บสถานะ soundfile (จะ set ใน process_audio)
-SOUNDFILE_AVAILABLE = None
+# Import soundfile with error handling
+try:
+    import soundfile as sf
+    SOUNDFILE_AVAILABLE = True
+except ImportError:
+    SOUNDFILE_AVAILABLE = False
+    sf = None  # Set to None to avoid NameError
 
 # --- 1. MODEL ARCHITECTURE (ต้องเหมือนกับตอน Train เป๊ะๆ) ---
 class RVC_AnimeModel(nn.Module):
@@ -78,8 +82,6 @@ def load_model():
 
 def process_audio(uploaded_file, model):
     """ฟังก์ชันแปลงเสียง"""
-    global SOUNDFILE_AVAILABLE
-    
     device = torch.device(CONFIG['device'])
     
     # 1. อ่านไฟล์เสียงจาก Memory
@@ -88,19 +90,9 @@ def process_audio(uploaded_file, model):
         # ถ้าเป็น file object ให้ reset pointer
         uploaded_file.seek(0)
     
-    # Import soundfile แบบ lazy (เมื่อเรียกใช้จริง)
-    if SOUNDFILE_AVAILABLE is None:
-        try:
-            import soundfile as sf
-            SOUNDFILE_AVAILABLE = True
-        except ImportError:
-            SOUNDFILE_AVAILABLE = False
-    
     # ใช้ soundfile ถ้ามี (ไม่ต้องใช้ torchcodec) หรือใช้ torchaudio
     if SOUNDFILE_AVAILABLE:
         try:
-            # Import soundfile (ถ้ายังไม่ได้ import)
-            import soundfile as sf
             # ลองใช้ soundfile ก่อน (รองรับไฟล์ส่วนใหญ่และไม่ต้องใช้ torchcodec)
             audio_data, sr = sf.read(uploaded_file, dtype='float32', always_2d=False)
             
