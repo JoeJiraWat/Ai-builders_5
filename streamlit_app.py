@@ -6,6 +6,7 @@ import torchaudio.transforms as T
 import io
 import os
 import numpy as np
+import soundfile as sf
 
 # ตัวแปรสำหรับเก็บสถานะ soundfile (จะ set ใน process_audio)
 SOUNDFILE_AVAILABLE = None
