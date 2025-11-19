@@ -3,8 +3,10 @@ import torch
 import torch.nn as nn
 import torchaudio
 import torchaudio.transforms as T
+import soundfile as sf
 import io
 import os
+import numpy as np
 
 # --- 1. MODEL ARCHITECTURE (ต้องเหมือนกับตอน Train เป๊ะๆ) ---
 class RVC_AnimeModel(nn.Module):
@@ -75,20 +77,46 @@ def process_audio(uploaded_file, model):
     """ฟังก์ชันแปลงเสียง"""
     device = torch.device(CONFIG['device'])
     
-    # 1. อ่านไฟล์เสียงจาก Memory
-    waveform, sr = torchaudio.load(uploaded_file)
+    # 1. อ่านไฟล์เสียงจาก Memory ใช้ soundfile แทน torchaudio เพื่อหลีกเลี่ยง torchcodec
+    # ตรวจสอบว่าเป็น BytesIO หรือ file object
+    if hasattr(uploaded_file, 'read'):
+        # ถ้าเป็น file object ให้ reset pointer
+        uploaded_file.seek(0)
     
-    # 2. Resample ให้ตรงกับตอนเทรน (24kHz) - Cache resampler
+    try:
+        # ลองใช้ soundfile ก่อน (รองรับไฟล์ส่วนใหญ่และไม่ต้องใช้ torchcodec)
+        audio_data, sr = sf.read(uploaded_file, dtype='float32', always_2d=False)
+        
+        # แปลงเป็น torch tensor
+        if len(audio_data.shape) == 1:
+            # Mono audio
+            waveform = torch.from_numpy(audio_data).unsqueeze(0)  # [1, length]
+        else:
+            # Multi-channel audio
+            waveform = torch.from_numpy(audio_data.T)  # [channels, length]
+            
+    except Exception as e:
+        # ถ้า soundfile ไม่รองรับ ลองใช้ torchaudio (อาจจะต้องมี torchcodec)
+        # แต่ถ้าเป็นไฟล์ที่บันทึกจากไมโครโฟน (WAV) soundfile ควรจะอ่านได้
+        try:
+            # Reset file pointer
+            if hasattr(uploaded_file, 'seek'):
+                uploaded_file.seek(0)
+            waveform, sr = torchaudio.load(uploaded_file)
+        except Exception as e2:
+            raise Exception(f"ไม่สามารถโหลดไฟล์เสียงได้: {str(e)}. {str(e2)}")
+    
+    # 2. Convert to Mono (ถ้ามี 2 channel รวมให้เหลือ 1)
+    if waveform.shape[0] > 1:
+        waveform = torch.mean(waveform, dim=0, keepdim=True)
+    
+    # 3. Resample ให้ตรงกับตอนเทรน (24kHz)
     if sr != CONFIG['sample_rate']:
         resampler = T.Resample(sr, CONFIG['sample_rate']).to(device)
         waveform = waveform.to(device)
         waveform = resampler(waveform)
     else:
         waveform = waveform.to(device)
-        
-    # 3. Convert to Mono (ถ้ามี 2 channel รวมให้เหลือ 1)
-    if waveform.shape[0] > 1:
-        waveform = torch.mean(waveform, dim=0, keepdim=True)
         
     # 4. ส่งเข้าโมเดล (Inference)
     input_tensor = waveform.unsqueeze(0) # เพิ่ม Batch dim -> [1, 1, Length]
