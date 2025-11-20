@@ -6,12 +6,13 @@ import torchaudio.transforms as T
 import io
 import os
 import numpy as np
+import traceback
 
 # Import soundfile with error handling
 try:
     import soundfile as sf
     SOUNDFILE_AVAILABLE = True
-except ImportError:
+except (ImportError, OSError) as e:
     SOUNDFILE_AVAILABLE = False
     sf = None
 
@@ -88,113 +89,182 @@ def load_model():
             
         return model, "✅ โหลดโมเดลสำเร็จพร้อมใช้งาน!"
     except Exception as e:
-        return None, f"❌ เกิดข้อผิดพลาด: {e}"
+        error_msg = f"❌ เกิดข้อผิดพลาด: {str(e)}"
+        return None, error_msg
 
 # ============================================================================
 # AUDIO PROCESSING
 # ============================================================================
 def load_audio_file(audio_file):
     """โหลดไฟล์เสียงและแปลงเป็น torch tensor"""
-    # Reset file pointer
-    if hasattr(audio_file, 'seek'):
-        audio_file.seek(0)
+    errors = []
     
-    # ใช้ soundfile ถ้ามี
+    # Reset file pointer
+    try:
+        if hasattr(audio_file, 'seek'):
+            audio_file.seek(0)
+    except Exception as e:
+        errors.append(f"ไม่สามารถ reset file pointer: {str(e)}")
+    
+    # วิธีที่ 1: ใช้ soundfile
     if SOUNDFILE_AVAILABLE:
         try:
-            audio_data, sr = sf.read(audio_file, dtype='float32', always_2d=False)
+            # สำหรับ BytesIO หรือ file-like object
+            if hasattr(audio_file, 'read'):
+                # ต้องอ่านเป็น bytes ก่อน
+                audio_file.seek(0)
+                audio_bytes = audio_file.read()
+                temp_file = io.BytesIO(audio_bytes)
+                audio_data, sr = sf.read(temp_file, dtype='float32', always_2d=False)
+            else:
+                audio_data, sr = sf.read(audio_file, dtype='float32', always_2d=False)
             
             if audio_data.size == 0:
                 raise ValueError("ไฟล์เสียงว่างเปล่า")
             
             # แปลงเป็น torch tensor
             if len(audio_data.shape) == 1:
-                waveform = torch.from_numpy(audio_data).unsqueeze(0)
+                waveform = torch.from_numpy(audio_data.copy()).unsqueeze(0).float()
             else:
-                waveform = torch.from_numpy(audio_data.T)
+                waveform = torch.from_numpy(audio_data.T.copy()).float()
             
-            return waveform, sr
-            
-        except Exception as e:
-            # Fallback ไปใช้ torchaudio
-            if hasattr(audio_file, 'seek'):
-                audio_file.seek(0)
-            try:
-                waveform, sr = torchaudio.load(audio_file)
-                if waveform.numel() == 0:
-                    raise ValueError("ไฟล์เสียงว่างเปล่า")
-                return waveform, sr
-            except Exception as e2:
-                raise Exception(f"ไม่สามารถโหลดไฟล์เสียงได้: {str(e)} | {str(e2)}")
-    else:
-        # ใช้ torchaudio โดยตรง
-        try:
-            waveform, sr = torchaudio.load(audio_file)
             if waveform.numel() == 0:
-                raise ValueError("ไฟล์เสียงว่างเปล่า")
-            return waveform, sr
+                raise ValueError("ไม่สามารถโหลดข้อมูลเสียงได้")
+            
+            return waveform, int(sr)
+            
         except Exception as e:
-            raise Exception(f"ไม่สามารถโหลดไฟล์เสียงได้: {str(e)}")
+            errors.append(f"soundfile error: {str(e)}")
+    
+    # วิธีที่ 2: ใช้ torchaudio (fallback)
+    try:
+        if hasattr(audio_file, 'seek'):
+            audio_file.seek(0)
+        
+        # สำหรับ BytesIO ต้องใช้วิธีพิเศษ
+        if isinstance(audio_file, io.BytesIO):
+            waveform, sr = torchaudio.load(audio_file, format="wav")
+        else:
+            waveform, sr = torchaudio.load(audio_file)
+        
+        if waveform.numel() == 0:
+            raise ValueError("ไฟล์เสียงว่างเปล่า")
+        
+        return waveform.float(), int(sr)
+        
+    except Exception as e:
+        errors.append(f"torchaudio error: {str(e)}")
+    
+    # ถ้าทั้งสองวิธีล้มเหลว
+    error_msg = "ไม่สามารถโหลดไฟล์เสียงได้:\n" + "\n".join(f"- {err}" for err in errors)
+    raise Exception(error_msg)
 
 def preprocess_audio(waveform, sr, target_sr=24000):
     """ประมวลผลเสียงก่อนส่งเข้าโมเดล"""
     device = torch.device(CONFIG['device'])
     
-    # Convert to Mono
-    if waveform.shape[0] > 1:
-        waveform = torch.mean(waveform, dim=0, keepdim=True)
-    
-    # Resample
-    if sr != target_sr:
-        resampler = T.Resample(sr, target_sr).to(device)
-        waveform = waveform.to(device)
-        waveform = resampler(waveform)
-    else:
-        waveform = waveform.to(device)
-    
-    return waveform
-
-def process_audio(audio_file, model):
-    """ฟังก์ชันหลักสำหรับแปลงเสียง"""
-    device = torch.device(CONFIG['device'])
-    
     try:
-        # 1. โหลดไฟล์เสียง
-        waveform, sr = load_audio_file(audio_file)
+        # Convert to Mono
+        if waveform.shape[0] > 1:
+            waveform = torch.mean(waveform, dim=0, keepdim=True)
         
-        # 2. Preprocess
-        waveform = preprocess_audio(waveform, sr, CONFIG['sample_rate'])
-        
-        # ตรวจสอบข้อมูล
+        # ตรวจสอบว่า waveform มีข้อมูล
         if waveform.numel() == 0:
             raise ValueError("ข้อมูลเสียงว่างเปล่า")
         
+        # Resample
+        if sr != target_sr:
+            try:
+                resampler = T.Resample(sr, target_sr).to(device)
+                waveform = waveform.to(device)
+                waveform = resampler(waveform)
+            except Exception as e:
+                raise Exception(f"ไม่สามารถ resample ได้: {str(e)}")
+        else:
+            waveform = waveform.to(device)
+        
+        # ตรวจสอบอีกครั้งหลัง resample
+        if waveform.numel() == 0:
+            raise ValueError("ข้อมูลเสียงหายไปหลัง resample")
+        
+        return waveform
+        
+    except Exception as e:
+        raise Exception(f"เกิดข้อผิดพลาดในการ preprocess: {str(e)}")
+
+def process_audio(audio_file, model):
+    """ฟังก์ชันหลักสำหรับแปลงเสียง"""
+    try:
+        # 1. โหลดไฟล์เสียง
+        try:
+            waveform, sr = load_audio_file(audio_file)
+        except Exception as e:
+            raise Exception(f"ขั้นตอนที่ 1 (โหลดไฟล์): {str(e)}")
+        
+        # 2. Preprocess
+        try:
+            waveform = preprocess_audio(waveform, sr, CONFIG['sample_rate'])
+        except Exception as e:
+            raise Exception(f"ขั้นตอนที่ 2 (preprocess): {str(e)}")
+        
         # 3. Inference
-        input_tensor = waveform.unsqueeze(0)  # [1, 1, length]
-        
-        with torch.no_grad():
-            output_tensor = model(input_tensor)
-        
-        if output_tensor.numel() == 0:
-            raise ValueError("โมเดลไม่สามารถแปลงเสียงได้")
+        try:
+            input_tensor = waveform.unsqueeze(0)  # [1, 1, length]
+            
+            # ตรวจสอบ shape
+            if len(input_tensor.shape) != 3:
+                raise ValueError(f"Input tensor shape ไม่ถูกต้อง: {input_tensor.shape}")
+            
+            with torch.no_grad():
+                output_tensor = model(input_tensor)
+            
+            if output_tensor.numel() == 0:
+                raise ValueError("โมเดลไม่สามารถแปลงเสียงได้ - ผลลัพธ์ว่างเปล่า")
+                
+        except Exception as e:
+            raise Exception(f"ขั้นตอนที่ 3 (inference): {str(e)}")
         
         # 4. Post-process
-        output_waveform = output_tensor.squeeze(0).cpu()
-        
-        # Normalize เพื่อป้องกัน clipping
-        max_val = torch.abs(output_waveform).max()
-        if max_val > 0:
-            output_waveform = output_waveform / max_val * 0.95
+        try:
+            output_waveform = output_tensor.squeeze(0).cpu()
+            
+            # ตรวจสอบว่าเป็น tensor ที่ถูกต้อง
+            if output_waveform.numel() == 0:
+                raise ValueError("ผลลัพธ์ว่างเปล่า")
+            
+            # Normalize เพื่อป้องกัน clipping
+            max_val = torch.abs(output_waveform).max()
+            if max_val > 0:
+                output_waveform = output_waveform / max_val * 0.95
+            
+        except Exception as e:
+            raise Exception(f"ขั้นตอนที่ 4 (post-process): {str(e)}")
         
         # 5. บันทึกเป็นไฟล์
-        buffer = io.BytesIO()
-        torchaudio.save(buffer, output_waveform, CONFIG['sample_rate'], format="wav")
-        buffer.seek(0)
+        try:
+            buffer = io.BytesIO()
+            torchaudio.save(
+                buffer,
+                output_waveform,
+                CONFIG['sample_rate'],
+                format="wav"
+            )
+            buffer.seek(0)
+            
+            # ตรวจสอบว่า buffer มีข้อมูล
+            if buffer.getvalue() is None or len(buffer.getvalue()) == 0:
+                raise ValueError("ไม่สามารถสร้างไฟล์เสียงได้")
+            
+        except Exception as e:
+            raise Exception(f"ขั้นตอนที่ 5 (บันทึกไฟล์): {str(e)}")
         
         return buffer
         
     except Exception as e:
-        raise Exception(f"เกิดข้อผิดพลาดในการแปลงเสียง: {str(e)}")
+        # เพิ่ม traceback สำหรับ debugging
+        error_trace = traceback.format_exc()
+        full_error = f"{str(e)}\n\nTraceback:\n{error_trace}"
+        raise Exception(full_error)
 
 # ============================================================================
 # STREAMLIT UI
@@ -223,6 +293,10 @@ def main():
     if model:
         st.sidebar.success(status_msg)
         st.sidebar.info(f"⚙️ Device: {CONFIG['device'].upper()}")
+        if SOUNDFILE_AVAILABLE:
+            st.sidebar.success("✅ soundfile พร้อมใช้งาน")
+        else:
+            st.sidebar.warning("⚠️ ใช้ torchaudio (อาจต้องใช้ torchcodec)")
     else:
         st.sidebar.error(status_msg)
         st.stop()
@@ -267,7 +341,10 @@ def main():
             audio_source = uploaded_file
             audio_name = uploaded_file.name
             st.success("✅ อัปโหลดไฟล์สำเร็จ!")
-            st.audio(uploaded_file, format='audio/wav')
+            try:
+                st.audio(uploaded_file, format='audio/wav')
+            except:
+                st.audio(uploaded_file)
             st.info(f"📄 ไฟล์: {uploaded_file.name}")
     
     # แสดงปุ่มแปลงเสียง
@@ -276,27 +353,35 @@ def main():
         st.subheader("2. แปลงเสียง")
         
         # แสดงเสียงต้นฉบับ
-        st.audio(audio_source, format='audio/wav')
+        try:
+            st.audio(audio_source, format='audio/wav')
+        except:
+            st.audio(audio_source)
         st.caption(f"🎵 เสียงต้นฉบับ: {audio_name}")
         
         # ปุ่มแปลงเสียง
         if st.button("✨ แปลงเสียงเป็น Anime ✨", type="primary", use_container_width=True):
+            error_container = st.container()
+            
             try:
                 with st.spinner('🤖 AI กำลังร่ายเวทมนตร์... (Converting)'):
                     # Reset file pointer
                     if hasattr(audio_source, 'seek'):
-                        audio_source.seek(0)
+                        try:
+                            audio_source.seek(0)
+                        except:
+                            pass
                     
                     # ตรวจสอบโมเดล
                     if model is None:
-                        st.error("❌ โมเดลยังไม่พร้อมใช้งาน")
+                        error_container.error("❌ โมเดลยังไม่พร้อมใช้งาน")
                         st.stop()
                     
                     # แปลงเสียง
                     converted_audio_bytes = process_audio(audio_source, model)
                     
                     if converted_audio_bytes is None:
-                        st.error("❌ ไม่สามารถแปลงเสียงได้ - ไม่มีผลลัพธ์")
+                        error_container.error("❌ ไม่สามารถแปลงเสียงได้ - ไม่มีผลลัพธ์")
                         st.stop()
                     
                     # แสดงผลลัพธ์
@@ -308,9 +393,16 @@ def main():
                         st.audio(converted_audio_bytes, format='audio/wav')
                     except Exception as e:
                         st.warning(f"⚠️ ไม่สามารถแสดงเสียงได้: {e}")
+                        # ลองอีกครั้งโดยไม่ระบุ format
+                        try:
+                            converted_audio_bytes.seek(0)
+                            st.audio(converted_audio_bytes)
+                        except:
+                            pass
                     
                     # ปุ่มดาวน์โหลด
                     try:
+                        converted_audio_bytes.seek(0)
                         st.download_button(
                             label="📥 ดาวน์โหลดไฟล์เสียงใหม่",
                             data=converted_audio_bytes,
@@ -322,22 +414,24 @@ def main():
                         st.warning(f"⚠️ ไม่สามารถสร้างปุ่มดาวน์โหลดได้: {e}")
                         
             except Exception as e:
-                st.error("❌ เกิดข้อผิดพลาดขณะแปลงเสียง")
-                st.error(f"**รายละเอียด**: {str(e)}")
+                error_container.error("❌ เกิดข้อผิดพลาดขณะแปลงเสียง")
+                error_container.error(f"**รายละเอียด**: {str(e)}")
                 
                 # แสดงรายละเอียด error
-                with st.expander("🔍 ดูรายละเอียดข้อผิดพลาด"):
-                    st.exception(e)
+                with st.expander("🔍 ดูรายละเอียดข้อผิดพลาด (สำหรับ Developer)"):
+                    st.code(traceback.format_exc(), language="python")
                 
                 # คำแนะนำ
                 st.info("💡 **คำแนะนำ**:")
                 st.info("1. ตรวจสอบว่าไฟล์เสียงไม่เสียหาย")
-                st.info("2. ลองใช้ไฟล์เสียงอื่น")
-                st.info("3. ตรวจสอบว่าไฟล์เสียงมีขนาดไม่ใหญ่เกินไป")
+                st.info("2. ลองใช้ไฟล์เสียงอื่น (WAV format แนะนำ)")
+                st.info("3. ตรวจสอบว่าไฟล์เสียงมีขนาดไม่ใหญ่เกินไป (< 10MB)")
+                st.info("4. ลองรีเฟรชหน้าเว็บและลองอีกครั้ง")
     
     # Footer
     st.markdown("---")
     st.caption("Powered by PyTorch & Streamlit | Model: Simple Conv1d RVC")
 
+# Run the app
 if __name__ == "__main__":
     main()
