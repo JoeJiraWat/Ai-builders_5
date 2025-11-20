@@ -43,11 +43,41 @@ class RVC_AnimeModel(nn.Module):
 # ============================================================================
 # CONFIGURATION
 # ============================================================================
+def get_device():
+    """ตรวจสอบและเลือก device ที่เหมาะสม"""
+    # ตรวจสอบ CUDA
+    if torch.cuda.is_available():
+        device = "cuda"
+        try:
+            # ตรวจสอบว่า GPU ใช้งานได้จริง
+            test_tensor = torch.zeros(1).to(device)
+            del test_tensor
+            torch.cuda.empty_cache()
+            return device
+        except Exception:
+            # ถ้า GPU มีปัญหา ใช้ CPU แทน
+            return "cpu"
+    else:
+        return "cpu"
+
 CONFIG = {
     "sample_rate": 24000,
-    "device": "cuda" if torch.cuda.is_available() else "cpu",
+    "device": get_device(),
     "model_path": "model/rvc_anime_epoch_50.pth"
 }
+
+# ฟังก์ชันสำหรับแสดงข้อมูล GPU
+def get_gpu_info():
+    """ดึงข้อมูล GPU"""
+    if torch.cuda.is_available():
+        try:
+            gpu_name = torch.cuda.get_device_name(0)
+            gpu_memory = torch.cuda.get_device_properties(0).total_memory / 1024**3  # GB
+            return f"{gpu_name} ({gpu_memory:.1f} GB)"
+        except:
+            return "GPU Available (Unknown)"
+    else:
+        return "CPU Only"
 
 # ============================================================================
 # MODEL LOADING
@@ -215,13 +245,26 @@ def process_audio(audio_file, model):
             if len(input_tensor.shape) != 3:
                 raise ValueError(f"Input tensor shape ไม่ถูกต้อง: {input_tensor.shape}")
             
+            # ใช้ GPU ถ้ามี
+            device = torch.device(CONFIG['device'])
+            if device.type == 'cuda':
+                # Clear GPU cache ก่อนใช้งาน
+                torch.cuda.empty_cache()
+            
             with torch.no_grad():
                 output_tensor = model(input_tensor)
+            
+            # Clear GPU cache หลังใช้งาน
+            if device.type == 'cuda':
+                torch.cuda.empty_cache()
             
             if output_tensor.numel() == 0:
                 raise ValueError("โมเดลไม่สามารถแปลงเสียงได้ - ผลลัพธ์ว่างเปล่า")
                 
         except Exception as e:
+            # Clear GPU cache ถ้าเกิด error
+            if CONFIG['device'] == 'cuda':
+                torch.cuda.empty_cache()
             raise Exception(f"ขั้นตอนที่ 3 (inference): {str(e)}")
         
         # 4. Post-process
@@ -292,7 +335,20 @@ def main():
     st.sidebar.header("Model Status")
     if model:
         st.sidebar.success(status_msg)
-        st.sidebar.info(f"⚙️ Device: {CONFIG['device'].upper()}")
+        
+        # แสดงข้อมูล Device
+        device_name = CONFIG['device'].upper()
+        if device_name == "CUDA":
+            gpu_info = get_gpu_info()
+            st.sidebar.success(f"🚀 GPU: {gpu_info}")
+            st.sidebar.info(f"⚙️ Device: {device_name}")
+        else:
+            st.sidebar.info(f"⚙️ Device: {device_name}")
+            if torch.cuda.is_available():
+                st.sidebar.warning("⚠️ GPU พบแต่ไม่สามารถใช้งานได้ ใช้ CPU แทน")
+            else:
+                st.sidebar.info("💻 ใช้ CPU (ไม่มี GPU)")
+        
         if SOUNDFILE_AVAILABLE:
             st.sidebar.success("✅ soundfile พร้อมใช้งาน")
         else:
