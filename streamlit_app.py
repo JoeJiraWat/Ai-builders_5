@@ -1,20 +1,29 @@
 import streamlit as st
 import torch
 import torch.nn as nn
-import torchaudio
-import torchaudio.transforms as T
 import io
 import os
 import numpy as np
 import traceback
 
-# Import soundfile with error handling
+# Import soundfile (หลัก)
 try:
     import soundfile as sf
     SOUNDFILE_AVAILABLE = True
 except (ImportError, OSError) as e:
     SOUNDFILE_AVAILABLE = False
     sf = None
+
+# Import torchaudio แบบ lazy (เมื่อจำเป็นจริงๆ)
+TORCHAUDIO_AVAILABLE = False
+try:
+    import torchaudio
+    import torchaudio.transforms as T
+    TORCHAUDIO_AVAILABLE = True
+except (ImportError, OSError) as e:
+    # ถ้า torchaudio ไม่สามารถโหลดได้ ใช้ soundfile และ scipy แทน
+    torchaudio = None
+    T = None
 
 # ============================================================================
 # MODEL ARCHITECTURE
@@ -166,24 +175,25 @@ def load_audio_file(audio_file):
         except Exception as e:
             errors.append(f"soundfile error: {str(e)}")
     
-    # วิธีที่ 2: ใช้ torchaudio (fallback)
-    try:
-        if hasattr(audio_file, 'seek'):
-            audio_file.seek(0)
-        
-        # สำหรับ BytesIO ต้องใช้วิธีพิเศษ
-        if isinstance(audio_file, io.BytesIO):
-            waveform, sr = torchaudio.load(audio_file, format="wav")
-        else:
-            waveform, sr = torchaudio.load(audio_file)
-        
-        if waveform.numel() == 0:
-            raise ValueError("ไฟล์เสียงว่างเปล่า")
-        
-        return waveform.float(), int(sr)
-        
-    except Exception as e:
-        errors.append(f"torchaudio error: {str(e)}")
+    # วิธีที่ 2: ใช้ torchaudio (fallback) - ถ้ามี
+    if TORCHAUDIO_AVAILABLE:
+        try:
+            if hasattr(audio_file, 'seek'):
+                audio_file.seek(0)
+            
+            # สำหรับ BytesIO ต้องใช้วิธีพิเศษ
+            if isinstance(audio_file, io.BytesIO):
+                waveform, sr = torchaudio.load(audio_file, format="wav")
+            else:
+                waveform, sr = torchaudio.load(audio_file)
+            
+            if waveform.numel() == 0:
+                raise ValueError("ไฟล์เสียงว่างเปล่า")
+            
+            return waveform.float(), int(sr)
+            
+        except Exception as e:
+            errors.append(f"torchaudio error: {str(e)}")
     
     # ถ้าทั้งสองวิธีล้มเหลว
     error_msg = "ไม่สามารถโหลดไฟล์เสียงได้:\n" + "\n".join(f"- {err}" for err in errors)
@@ -205,9 +215,18 @@ def preprocess_audio(waveform, sr, target_sr=24000):
         # Resample
         if sr != target_sr:
             try:
-                resampler = T.Resample(sr, target_sr).to(device)
-                waveform = waveform.to(device)
-                waveform = resampler(waveform)
+                # ใช้ torchaudio ถ้ามี
+                if TORCHAUDIO_AVAILABLE and T is not None:
+                    resampler = T.Resample(sr, target_sr).to(device)
+                    waveform = waveform.to(device)
+                    waveform = resampler(waveform)
+                else:
+                    # ใช้ scipy.signal.resample แทน
+                    from scipy import signal
+                    waveform_np = waveform.squeeze(0).numpy()
+                    num_samples = int(len(waveform_np) * target_sr / sr)
+                    resampled = signal.resample(waveform_np, num_samples)
+                    waveform = torch.from_numpy(resampled).unsqueeze(0).float().to(device)
             except Exception as e:
                 raise Exception(f"ไม่สามารถ resample ได้: {str(e)}")
         else:
@@ -286,13 +305,25 @@ def process_audio(audio_file, model):
         # 5. บันทึกเป็นไฟล์
         try:
             buffer = io.BytesIO()
-            torchaudio.save(
-                buffer,
-                output_waveform,
-                CONFIG['sample_rate'],
-                format="wav"
-            )
-            buffer.seek(0)
+            
+            # ใช้ soundfile ถ้ามี (แนะนำ)
+            if SOUNDFILE_AVAILABLE:
+                # แปลงเป็น numpy array
+                audio_np = output_waveform.squeeze(0).numpy()
+                # บันทึกลง buffer
+                sf.write(buffer, audio_np, CONFIG['sample_rate'], format='WAV')
+                buffer.seek(0)
+            # ใช้ torchaudio ถ้าไม่มี soundfile
+            elif TORCHAUDIO_AVAILABLE:
+                torchaudio.save(
+                    buffer,
+                    output_waveform,
+                    CONFIG['sample_rate'],
+                    format="wav"
+                )
+                buffer.seek(0)
+            else:
+                raise Exception("ไม่สามารถบันทึกไฟล์ได้ - ต้องมี soundfile หรือ torchaudio")
             
             # ตรวจสอบว่า buffer มีข้อมูล
             if buffer.getvalue() is None or len(buffer.getvalue()) == 0:
@@ -351,8 +382,10 @@ def main():
         
         if SOUNDFILE_AVAILABLE:
             st.sidebar.success("✅ soundfile พร้อมใช้งาน")
+        elif TORCHAUDIO_AVAILABLE:
+            st.sidebar.warning("⚠️ ใช้ torchaudio (soundfile ไม่พร้อม)")
         else:
-            st.sidebar.warning("⚠️ ใช้ torchaudio (อาจต้องใช้ torchcodec)")
+            st.sidebar.error("❌ ไม่มี soundfile หรือ torchaudio")
     else:
         st.sidebar.error(status_msg)
         st.stop()
@@ -396,24 +429,71 @@ def main():
         if uploaded_file is not None:
             audio_source = uploaded_file
             audio_name = uploaded_file.name
+            
+            # แสดงข้อมูลไฟล์
+            file_size = len(uploaded_file.getvalue()) / (1024 * 1024)  # MB
             st.success("✅ อัปโหลดไฟล์สำเร็จ!")
-            try:
-                st.audio(uploaded_file, format='audio/wav')
-            except:
-                st.audio(uploaded_file)
-            st.info(f"📄 ไฟล์: {uploaded_file.name}")
+            st.info(f"📄 ไฟล์: {uploaded_file.name} ({file_size:.1f} MB)")
+            
+            # แสดง audio player (สำหรับไฟล์เล็ก) หรือแสดงข้อความสำหรับไฟล์ใหญ่
+            if file_size > 50:
+                st.warning(f"⚠️ ไฟล์มีขนาดใหญ่ ({file_size:.1f} MB) - Audio player อาจไม่แสดงได้")
+                st.info("💡 ไฟล์จะถูกประมวลผลได้ปกติ แต่การแสดงผลอาจมีปัญหา")
+            else:
+                try:
+                    # Reset file pointer ก่อนแสดง
+                    uploaded_file.seek(0)
+                    st.audio(uploaded_file, format='audio/wav')
+                except Exception as e:
+                    try:
+                        uploaded_file.seek(0)
+                        st.audio(uploaded_file)
+                    except:
+                        st.warning("⚠️ ไม่สามารถแสดง audio player ได้ แต่ไฟล์พร้อมใช้งาน")
     
     # แสดงปุ่มแปลงเสียง
     if audio_source is not None:
         st.markdown("---")
         st.subheader("2. แปลงเสียง")
         
-        # แสดงเสียงต้นฉบับ
+        # แสดงข้อมูลไฟล์
         try:
-            st.audio(audio_source, format='audio/wav')
+            if hasattr(audio_source, 'getvalue'):
+                file_size = len(audio_source.getvalue()) / (1024 * 1024)  # MB
+                file_info = f" ({file_size:.1f} MB)"
+            else:
+                file_info = ""
         except:
-            st.audio(audio_source)
-        st.caption(f"🎵 เสียงต้นฉบับ: {audio_name}")
+            file_info = ""
+        
+        st.caption(f"🎵 เสียงต้นฉบับ: {audio_name}{file_info}")
+        
+        # แสดง audio player (ถ้าไฟล์ไม่ใหญ่เกินไป)
+        try:
+            if hasattr(audio_source, 'getvalue'):
+                file_size = len(audio_source.getvalue()) / (1024 * 1024)
+                if file_size <= 50:
+                    if hasattr(audio_source, 'seek'):
+                        audio_source.seek(0)
+                    try:
+                        st.audio(audio_source, format='audio/wav')
+                    except:
+                        if hasattr(audio_source, 'seek'):
+                            audio_source.seek(0)
+                        st.audio(audio_source)
+                else:
+                    st.info(f"📊 ไฟล์ขนาดใหญ่ ({file_size:.1f} MB) - พร้อมแปลงเสียงได้")
+            else:
+                if hasattr(audio_source, 'seek'):
+                    audio_source.seek(0)
+                try:
+                    st.audio(audio_source, format='audio/wav')
+                except:
+                    if hasattr(audio_source, 'seek'):
+                        audio_source.seek(0)
+                    st.audio(audio_source)
+        except Exception as e:
+            st.info("📊 ไฟล์พร้อมแปลงเสียงได้")
         
         # ปุ่มแปลงเสียง
         if st.button("✨ แปลงเสียงเป็น Anime ✨", type="primary", use_container_width=True):
